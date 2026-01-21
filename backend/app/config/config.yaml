@@ -1,0 +1,303 @@
+# Primary LLM for OCR (Maverick via Groq)
+ocr_llm:
+  provider: "groq"
+  model: "meta-llama/llama-4-maverick-17b-128e-instruct"
+  base_url: "https://api.groq.com/openai/v1"
+  api_key: "${GROQ_API_KEY}"
+  timeout_seconds: 120
+  max_tokens_per_request: 4500
+  retry_backoff_seconds: 5
+  max_retries: 15
+
+# Evaluation LLM (Qwen3-VL via Fireworks AI)
+evaluation_llm:
+  provider: "fireworks"
+  model: "accounts/fireworks/models/qwen3-vl-235b-a22b-thinking"
+  base_url: "https://api.fireworks.ai/inference/v1"
+  api_key: "${FIREWORKS_API_KEY}"
+  timeout_seconds: 300
+  max_tokens_per_request: 32768
+  retry_backoff_seconds: 5
+  max_retries: 10
+  temperature: 0.6
+  top_p: 1
+  top_k: 40
+
+# Legacy llm config for backward compatibility
+llm:
+  provider: "groq"
+  model: "meta-llama/llama-4-maverick-17b-128e-instruct"
+  base_url: "https://api.groq.com/openai/v1"
+  api_key: "${GROQ_API_KEY}"
+  timeout_seconds: 120
+  max_tokens_per_request: 4500
+  retry_backoff_seconds: 5
+  max_retries: 15
+
+ocr:
+  engine: "llm"
+  dpi: 200
+
+paths:
+  uploads: "./uploads"
+  outputs: "./outputs"
+  checkpoints: "./checkpoints"
+
+# TPM Safety: Groq limit is 6,000 TPM. We stay under 4,500 tokens per request.
+tpm_safety:
+  groq_tpm_limit: 6000
+  safe_tokens_per_request: 4500
+  token_budget:
+    system_instructions: 600
+    questions: 1100
+    answers: 1100
+    student: 1100
+    output_buffer: 600
+
+# ====================================
+# PT-II EXAM STRUCTURE (FIXED)
+# ====================================
+# Only PT-II mode is supported. Structure is hardcoded.
+exam_structure:
+  section_A:
+    questions_count: 3
+    question_marks: 5
+    subdivisions:
+      i: 1
+      ii: 4
+    retain_best: 2
+    max_evaluated: 10
+  
+  section_B:
+    questions_count: 3
+    question_marks: 10
+    subdivisions:
+      i: 1
+      ii: 1
+      iii: 4  # Variable: can be 2, 3, 4, or 6 based on question
+      iv: 4   # Variable: same as iii
+    retain_best: 2
+    max_evaluated: 20
+  
+  section_C:
+    questions_count: 3
+    question_marks: 10
+    subdivisions:
+      i: 1
+      ii: 1
+      iii: 4
+      iv: 4
+    retain_best: 2
+    max_evaluated: 20
+  
+  total_max: 50
+  pass_marks: 25
+
+# ====================================
+# QUESTION TYPES FOR EVALUATION
+# ====================================
+question_types:
+  mcq:
+    evaluation: "strict"
+    partial_credit: false
+    description: "Multiple choice - exact option match required"
+  
+  true_false:
+    evaluation: "strict"
+    partial_credit: false
+    description: "True/False - wrong option means zero, even with explanation"
+  
+  descriptive:
+    evaluation: "liberal"
+    partial_credit: true
+    description: "Concept-based evaluation with proportional marks"
+  
+  numerical:
+    evaluation: "liberal"
+    partial_credit: true
+    description: "Method and reasoning matter more than final answer"
+  
+  ordering:
+    evaluation: "partial"
+    partial_credit: true
+    description: "Rearranging steps - partial credit for correct subsequences"
+
+# ====================================
+# HOLISTIC EVALUATION PROMPT
+# ====================================
+# New philosophy: Understand first, evaluate holistically, then structure.
+# ONE prompt that handles ALL evaluation in a single LLM call.
+
+holistic_evaluation_prompt: |
+  You are an expert university examiner for engineering examinations.
+  You must evaluate a student's answer script EXACTLY like a human examiner.
+
+  You are given THREE complete texts:
+  1) Question Paper (official)
+  2) Answer Key (official)
+  3) Student Answer Script (OCR extracted, noisy, unstructured)
+
+  IMPORTANT:
+  - The student answer text MAY contain OCR errors.
+  - Question numbers, section labels, and formatting MAY be incorrect or inconsistent.
+  - You MUST NOT rely on exact labels like A1, B2, C3 to evaluate.
+  - You MUST reason semantically and contextually.
+
+  ------------------------------------------------
+  YOUR TASK
+  ------------------------------------------------
+
+  Step 1: Deep Understanding (NO OUTPUT)
+  - Read the FULL question paper to understand structure, marks, and rules.
+  - Read the FULL answer key to understand expected answers and marking logic.
+  - Read the FULL student answer to understand intent, concepts, and responses.
+
+  Step 2: Intelligent Alignment (INTERNAL)
+  - Align student answers to questions based on meaning, not numbering.
+  - If the student writes "31)" or "(2)" or "(iv)", infer the intended question using content.
+  - If answers are out of order or mixed across pages, reconstruct them mentally.
+
+  Step 3: OCR Error Correction (INTERNAL)
+  - Correct spelling, symbols, formulas, and numbering mentally.
+  - Ignore duplicated steps caused by OCR.
+  - Merge broken lines and formulas logically.
+
+  Step 4: Evaluation Rules (STRICTLY FOLLOW)
+  - 1 mark MCQs / True-False → STRICT (exact correctness only).
+  - Ordering questions → Step-wise partial credit allowed.
+  - Numerical problems → Formula + correct substitution required.
+  - Descriptive (2+ marks) → LIBERAL, concept-wise evaluation.
+  - Do NOT penalize poor handwriting, grammar, or formatting.
+
+  Section Rules:
+  - Section A: Evaluate A1, A2, A3 → Retain BEST 2 only.
+  - Section B: Evaluate B1, B2, B3 → Retain BEST 2 only.
+  - Section C: Evaluate C1, C2, C3 → Retain BEST 2 only.
+
+  Total Marks = 50
+  Pass if ≥ 25
+
+  Step 5: Final Structuring (OUTPUT REQUIRED)
+  - After evaluation is COMPLETE, generate a clean JSON result.
+  - The JSON must reflect:
+    • Correct evaluation
+    • Correct dropping of lowest questions
+    • Correct section totals
+    • Correct final result
+
+  ------------------------------------------------
+  OUTPUT FORMAT (STRICT)
+  ------------------------------------------------
+
+  Return ONLY valid JSON.
+
+  {
+    "section_wise_evaluation": {
+      "A": {
+        "questions": {
+          "A1": { "awarded": X, "max": 5, "remarks": "..." },
+          "A2": { "awarded": X, "max": 5, "remarks": "..." },
+          "A3": { "awarded": X, "max": 5, "remarks": "..." }
+        },
+        "retained": ["A?", "A?"],
+        "section_total": X
+      },
+      "B": {
+        "questions": {
+          "B1": { "awarded": X, "max": 10, "remarks": "..." },
+          "B2": { "awarded": X, "max": 10, "remarks": "..." },
+          "B3": { "awarded": X, "max": 10, "remarks": "..." }
+        },
+        "retained": ["B?", "B?"],
+        "section_total": X
+      },
+      "C": {
+        "questions": {
+          "C1": { "awarded": X, "max": 10, "remarks": "..." },
+          "C2": { "awarded": X, "max": 10, "remarks": "..." },
+          "C3": { "awarded": X, "max": 10, "remarks": "..." }
+        },
+        "retained": ["C?", "C?"],
+        "section_total": X
+      }
+    },
+    "final_summary": {
+      "total_marks": X,
+      "max_marks": 50,
+      "result": "PASS or FAIL",
+      "examiner_comment": "Short professional feedback"
+    }
+  }
+
+  ------------------------------------------------
+  CRITICAL CONSTRAINTS
+  ------------------------------------------------
+  - DO NOT hallucinate answers.
+  - DO NOT invent student responses.
+  - DO NOT rely on exact numbering.
+  - DO NOT output explanations outside JSON.
+  - Think like a human examiner, not a parser.
+
+# ====================================
+# SEMANTIC MAPPING PROMPT
+# ====================================
+semantic_mapping_prompt: |
+  You are mapping student answer chunks to questions.
+
+  QUESTION MODEL:
+  {question_model}
+
+  STUDENT CHUNKS:
+  {student_chunks}
+
+  For each chunk, determine:
+  1. Which question it answers (A1, A2, B1, etc.)
+  2. Which subdivision (i, ii, iii, iv)
+  3. Confidence (high/medium/low)
+
+  Use these signals:
+  - Option letters (a, b, c, d) match MCQ options
+  - Domain terms match question intent
+  - Numerical values match numerical questions
+  - Context clues from preceding/following chunks
+
+  Return JSON:
+  {
+    "mappings": [
+      {"chunk_id": 1, "question": "B2", "subdivision": "i", "confidence": "high"},
+      {"chunk_id": 2, "question": "B2", "subdivision": "iii", "confidence": "medium"},
+      ...
+    ],
+    "unmapped": [3, 7]
+  }
+
+# ====================================
+# QUESTION MODEL EXTRACTION PROMPT
+# ====================================
+question_model_prompt: |
+  Extract the Canonical Question Model from this question paper.
+
+  QUESTION PAPER TEXT:
+  {question_text}
+
+  For each question, extract:
+  - question_id: A1, A2, B1, etc.
+  - type: mcq | true_false | descriptive | numerical | ordering
+  - intent: What the question is asking (1 sentence)
+  - subdivisions: with marks and type for each
+  - options: For MCQs, list the options (a, b, c, d)
+
+  Return JSON:
+  {
+    "questions": {
+      "A1": {
+        "type": "mcq+descriptive",
+        "intent": "Identify landmarks in path planning and analyze error propagation",
+        "subdivisions": {
+          "i": {"marks": 1, "type": "mcq", "options": ["a", "b", "c", "d"]},
+          "ii": {"marks": 4, "type": "descriptive", "parts": 2}
+        }
+      },
+      ...
+    }
+  }
